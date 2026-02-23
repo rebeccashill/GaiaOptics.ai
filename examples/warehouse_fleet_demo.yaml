@@ -1,0 +1,34 @@
+scenario_name: warehouse_fleet_demo
+domain: warehouse_fleet
+
+warehouse_fleet:
+  seed: 7
+  grid:
+    width: 30
+    height: 20
+    obstacles: []   # optional
+
+  robots:
+    count: 20
+    battery_capacity: 100.0
+    energy_per_step: 1.0
+    starts: "random"   # or explicit list of coords
+
+  tasks:
+    count: 120
+    locations: "random"  # or explicit list
+
+  charging:
+    stations: [[2,2], [27,2], [2,17], [27,17]]
+    charge_rate: 5.0
+    min_soc_to_dispatch: 20.0
+
+  congestion:
+    enabled: true
+    cell_capacity: 2
+    penalty_per_excess: 10.0
+
+planner:
+  name: improved   # or baseline
+  iterations: 2000
+  seed: 7

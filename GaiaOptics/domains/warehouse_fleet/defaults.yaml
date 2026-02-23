@@ -1,0 +1,56 @@
+# gaiaoptics/domains/warehouse_fleet/defaults.yaml
+
+scenario_name: warehouse_fleet_demo
+domain: warehouse_fleet
+
+warehouse_fleet:
+
+  # ----------------------------
+  # Core Simulation Controls
+  # ----------------------------
+  seed: 7
+  horizon_steps: 200
+
+  # ----------------------------
+  # Grid Layout
+  # ----------------------------
+  grid:
+    width: 30
+    height: 20
+
+  # ----------------------------
+  # Robot Configuration
+  # ----------------------------
+  robots:
+    count: 20
+    battery_capacity: 250.0        # generous to ensure feasibility
+    energy_per_step: 1.0
+    starts: "random"               # or explicit [[x,y], ...]
+
+  # ----------------------------
+  # Task Configuration
+  # ----------------------------
+  tasks:
+    count: 120
+    locations: "random"            # or explicit [[x,y], ...]
+
+  # ----------------------------
+  # Sampling Strategy
+  # ----------------------------
+  sampling:
+    strategy: "random"             # random | round_robin | greedy_nearest
+
+  # ----------------------------
+  # Objective Weights
+  # ----------------------------
+  objective:
+    distance_weight: 0.0           # keep primary objective = energy
+    soft_penalty_weight: 10.0      # penalize duplicate/missing tasks
+
+# ----------------------------
+# Planner Controls (core-level)
+# ----------------------------
+planner:
+  name: improved                   # or baseline if you support both
+  iterations: 1000
+  seed: 7
