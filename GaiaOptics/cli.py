@@ -238,10 +238,46 @@ def run_water_network(normalized_cfg: dict) -> RunArtifacts:
     worst_hard_margin = 0.18
     worst_hard_constraint = "pressure_min"
 
-    traces_rows = [
-        {"t": 0, "demand_lps": 80.0, "pump_kw": 12.0, "cost": 1.1, "emissions": 0.3},
-        {"t": 1, "demand_lps": 85.0, "pump_kw": 13.0, "cost": 1.2, "emissions": 0.35},
-    ]
+        # --- Minimal toy hydraulics for plotting credibility ---
+    wn = (normalized_cfg.get("water_network") or {}) if isinstance(normalized_cfg.get("water_network"), dict) else {}
+    horizon = (wn.get("horizon") or {}) if isinstance(wn.get("horizon"), dict) else {}
+
+    n_steps = int(horizon.get("n_steps", 24))
+    dt_hours = float(horizon.get("dt_hours", 1.0))
+
+    tank_cfg = (wn.get("tank") or {}) if isinstance(wn.get("tank"), dict) else {}
+    pump_cfg = (wn.get("pump") or {}) if isinstance(wn.get("pump"), dict) else {}
+
+    tank_level_m3 = float(tank_cfg.get("tank0_m3", 50.0))
+    pump_flow_m3ph_per_kw = float(pump_cfg.get("pump_flow_m3ph_per_kw", 1.0))
+
+    # Keep your existing stub values but compute a consistent tank trajectory.
+    # 1 L/s = 3.6 m3/hour
+    demand_lps_series = [5.0, 6.0]
+    pump_kw_series = [12.0, 13.0]
+    cost_series = [1.1, 1.2]
+    emissions_series = [0.3, 0.35]
+
+    traces_rows = []
+    for t in range(len(demand_lps_series)):
+        demand_lps = float(demand_lps_series[t])
+        demand_m3ph = demand_lps * 3.6
+
+        pump_kw = float(pump_kw_series[t])
+        inflow_m3ph = pump_kw * pump_flow_m3ph_per_kw
+
+        tank_level_m3 = tank_level_m3 + (inflow_m3ph - demand_m3ph) * dt_hours
+
+        traces_rows.append(
+            {
+                "t": int(t),
+                "demand_lps": demand_lps,
+                "pump_kw": pump_kw,
+                "tank_level_m3": float(tank_level_m3),  # ✅ required for plot
+                "cost": float(cost_series[t]),
+                "emissions": float(emissions_series[t]),
+            }
+        )
 
     solution = {
         "scenario": scenario["name"],
