@@ -1,27 +1,26 @@
 # examples/water_network_pumping_demo.yaml
 
 scenario:
-  name: water_network_pumping_demo
+  name: water_network_demo
   domain: water_network
   seed: 0
+
+planner:
+  name: baseline_random
+  iterations: 5
+
+water_network:
+  horizon:
+    n_steps: 12
+    dt_minutes: 60
 
 run:
   horizon_hours: 24
   timestep_minutes: 60
 
-planner:
-  name: baseline_random
-  iterations: 50
-  restarts: 1
-
 objectives:
   cost_weight: 1.0
   emissions_weight: 1.0
-
-water_network:
-  horizon:
-    n_steps: 24
-    dt_hours: 1
 
   series:
     demand_m3ph: 10

@@ -5,12 +5,13 @@ import json
 import subprocess
 import sys
 from pathlib import Path
+from textwrap import dedent
 
 import yaml
 
 
 def _write_yaml(path: Path, text: str) -> None:
-    path.write_text(text.strip() + "\n", encoding="utf-8")
+    path.write_text(dedent(text).strip() + "\n", encoding="utf-8")
 
 
 def _run_cli(yml_path: Path, outputs_root: Path) -> Path:
