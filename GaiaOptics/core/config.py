@@ -14,6 +14,22 @@ from gaiaoptics.core.errors import ConfigError
 
 CANONICAL_TOP_LEVEL_KEYS = ("scenario", "run", "planner", "objectives", "microgrid", "data_center", "water_network")
 
+def _domain_from_cfg(cfg: Mapping[str, Any]) -> str | None:
+    # Preferred schema
+    scenario = cfg.get("scenario")
+    if isinstance(scenario, Mapping):
+        d = scenario.get("domain")
+        if isinstance(d, Mapping):
+            name = d.get("name")
+            return name if isinstance(name, str) else None
+        return d if isinstance(d, str) else None
+
+    # Legacy schema: domain at top-level
+    d = cfg.get("domain")
+    if isinstance(d, Mapping):
+        name = d.get("name")
+        return name if isinstance(name, str) else None
+    return d if isinstance(d, str) else None
 
 def _as_dict(obj: Any, path: str) -> Dict[str, Any]:
     if obj is None:
@@ -66,6 +82,39 @@ def canonical_yaml_dump(data: Mapping[str, Any]) -> str:
         width=120,
     )
 
+from typing import Any, Dict
+
+
+def _ensure_dict(parent: Dict[str, Any], key: str) -> Dict[str, Any]:
+    v = parent.get(key)
+    if v is None:
+        parent[key] = {}
+        return parent[key]
+    if not isinstance(v, dict):
+        raise ConfigError(key, f"expected '{key}' to be a mapping")
+    return v
+
+
+def _normalize_microgrid(mg: Dict[str, Any], run: Dict[str, Any]) -> None:
+    # run defaults
+    run.setdefault("horizon_hours", 24)
+    run.setdefault("timestep_minutes", 60)
+
+    mg.setdefault(
+        "series",
+        {"price_per_kwh": 0.20, "carbon_kg_per_kwh": 0.40},
+    )
+    mg.setdefault(
+        "battery",
+        {
+            "capacity_kwh": 20.0,
+            "soc0_kwh": 10.0,
+            "p_charge_max_kw": 10.0,
+            "p_discharge_max_kw": 10.0,
+            "eta_charge": 0.95,
+            "eta_discharge": 0.95,
+        },
+    )
 
 def normalize_config(raw: Mapping[str, Any], *, source_path: Optional[Path] = None) -> Dict[str, Any]:
     """
@@ -77,8 +126,9 @@ def normalize_config(raw: Mapping[str, Any], *, source_path: Optional[Path] = No
     raw = _as_dict(raw, "yaml")
 
     # --- Gather legacy shortcuts ---
+    # --- Gather legacy shortcuts ---
     scenario_name = raw.get("scenario_name") or raw.get("name")
-    domain = raw.get("domain") or raw.get("scenario", {}).get("domain")
+    domain = _domain_from_cfg(raw)  # <-- ALWAYS returns str|None
 
     scenario = _as_dict(raw.get("scenario"), "scenario")
     run = _as_dict(raw.get("run"), "run")
@@ -171,6 +221,7 @@ def normalize_config(raw: Mapping[str, Any], *, source_path: Optional[Path] = No
         _derive_horizon(data_center)
 
     elif dom == "microgrid":
+        _normalize_microgrid(microgrid, run)
         # Your microgrid YAML is domain-shaped: horizon/series/battery/grid at top-level.
         _fold_top_level_into(microgrid, ["horizon", "series", "battery", "grid", "penalties", "options"])
         # Optional: derive horizon if user omitted it
@@ -226,11 +277,24 @@ def validate_config(cfg: Mapping[str, Any]) -> None:
     dom = scenario.get("domain", "microgrid")
     scenario["domain"] = dom
 
+    SUPPORTED_DOMAINS = {"microgrid", "data_center", "water_network"}
+
+    dom = _domain_from_cfg(cfg) or "microgrid"
+    if not isinstance(dom, str) or not dom:
+        raise ConfigError("domain", "missing/invalid domain (expected string or {name: ...})")
+
     if dom not in SUPPORTED_DOMAINS:
-        raise ConfigError(
-            "scenario.domain",
-            f"unsupported domain '{dom}'. Supported domains: {sorted(SUPPORTED_DOMAINS)}",
-        )
+        raise ConfigError("domain", f"unsupported domain: {dom}")
+
+    # ensure scenario.domain is canonical
+    scenario = _as_dict(cfg.get("scenario"), "scenario")
+    scenario["domain"] = dom
+
+    if not isinstance(dom, str) or not dom:
+        raise ConfigError("domain","missing/invalid domain (expected string or {name: ...})")
+
+    if dom not in SUPPORTED_DOMAINS:
+        raise ConfigError("domain", f"unsupported domain: {dom}")
 
     # Type checks
     seed = scenario.get("seed")

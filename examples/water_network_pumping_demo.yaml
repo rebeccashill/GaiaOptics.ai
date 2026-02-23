@@ -1,7 +1,7 @@
 # examples/water_network_pumping_demo.yaml
 
 scenario:
-  name: water_network_demo
+  name: water_network_pumping_demo
   domain: water_network
   seed: 0
 

@@ -19,7 +19,7 @@ def _write_minimal_water_config(path: Path) -> None:
     path.write_text(
         "\n".join(
             [
-                "scenario_name: water_network_demo",
+                "scenario_name: water_network_pumping_demo",
                 "seed: 0",
                 "horizon:",
                 "  n_steps: 12",
@@ -191,11 +191,11 @@ def test_water_network_end_to_end(tmp_path: Path) -> None:
     # Arrange
     repo_root = Path.cwd()
     outputs_root = repo_root / "outputs"
-    config_path = tmp_path / "water_network_demo.yaml"
+    config_path = tmp_path / "water_network_pumping_demo.yaml"
     _write_minimal_water_config(config_path)
 
     # Ensure a clean outputs area for the scenario
-    scenario_name = "water_network_demo"
+    scenario_name = "water_network_pumping_demo"
     scenario_out_dir = outputs_root / scenario_name
     if scenario_out_dir.exists():
         # Don’t delete all outputs, only the scenario folder
