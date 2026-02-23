@@ -1,0 +1,12 @@
+[project]
+name = "gaiaoptics"
+dynamic = ["version"]
+
+[tool.setuptools.dynamic]
+version = {attr = "gaiaoptics.__version__"}
+
+[tool.setuptools]
+packages = ["gaiaoptics"]
+
+[tool.pytest.ini_options]
+markers = ["end_to_end: end-to-end smoke tests"]

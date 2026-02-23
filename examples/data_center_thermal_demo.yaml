@@ -1,0 +1,30 @@
+scenario:
+  name: data_center_thermal_demo
+  domain: data_center
+  seed: 0
+
+run:
+  horizon_hours: 24
+  timestep_minutes: 60
+
+planner:
+  name: baseline_random
+  iterations: 5
+
+data_center:
+  horizon:
+    n_steps: 24
+    dt_hours: 1
+  series:
+    it_load_kw: 50
+    ambient_temp_c: 30
+    price_per_kwh: 0.2
+    carbon_kg_per_kwh: 0.4
+  thermal:
+    temp0_c: 24
+    temp_max_c: 28
+    thermal_mass_kwh_per_c: 50
+    ua_kw_per_c: 2
+    cop: 3
+  cooling:
+    p_max_kw: 30
