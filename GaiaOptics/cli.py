@@ -340,7 +340,7 @@ def run_data_center(normalized_cfg: dict) -> RunArtifacts:
         e_kwh = float(grid[i]) * dt
         row = {
             "t": int(t[i]) if isinstance(t, list) and i < len(t) else i,
-            "room_temp_c": float(temps[i])if temps[i] is not None else None,if temps[i] is not None and temps[i] != "" else None,
+            "room_temp_c": float(temps[i]) if temps[i] is not None and temps[i] != "" else None,
             "grid_import_kw": float(grid[i]),
             "cooling_power_kw": float(imp_tr.get("cooling_power_kw", [0.0] * n)[i]),
             "cost": e_kwh * float(price[i]),
