@@ -2,37 +2,35 @@ scenario_name: warehouse_fleet_demo
 domain: warehouse_fleet
 
 warehouse_fleet:
-  seed: 7
   horizon_steps: 200
+
   grid:
     width: 30
     height: 20
-    obstacles: []   # optional
 
   robots:
     count: 20
-    battery_capacity: 100.0
-    energy_per_step: 1.0
-    starts: "random"   # or explicit list of coords
+    battery_capacity: 200.0
+    energy_per_step: 1.3
+    starts: "random"
 
   tasks:
     count: 120
-    locations: "random"  # or explicit list
-
-  sampling:
-    strategy: "greedy_nearest"   # ensures energy-efficient routes → feasible
-
-  charging:
-    stations: [[2,2], [27,2], [2,17], [27,17]]
-    charge_rate: 5.0
-    min_soc_to_dispatch: 20.0
-
-  congestion:
-    enabled: true
-    cell_capacity: 2
-    penalty_per_excess: 10.0
+    locations: "random"
+  
+  future:
+    sampling:
+      strategy: greedy_nearest
+    charging:
+      stations: [[2,2], [27,2], [2,17], [27,17]]
+      charge_rate: 5.0
+      min_soc_to_dispatch: 20.0
+    congestion:
+      enabled: true
+      cell_capacity: 2
+      penalty_per_excess: 10.0
 
 planner:
-  name: improved   # or baseline
+  name: improved
   iterations: 2000
-  seed: 7
+  restarts: 1

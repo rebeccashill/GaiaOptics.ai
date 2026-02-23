@@ -182,36 +182,48 @@ def sample_decision(cfg: Dict[str, Any], seed: int) -> Dict[str, Any]:
 
 def repair_decision(cfg: Dict[str, Any], decision: Dict[str, Any]) -> Dict[str, Any]:
     """
-    Optional repair hook:
+    Repair hook (v1):
     - Ensures assignments has correct outer length (robots count)
     - Drops out-of-range task IDs
-    - (Optionally) can enforce each task appears at most once (soft by default in constraints.py)
+    - Optionally enforces uniqueness + fills missing tasks
+    - Battery-aware rebalancing: move tasks from overloaded robots to robots with slack
 
-    This is intentionally conservative: it avoids "inventing" missing tasks, because your
-    planner might want freedom to handle partials. Feasibility constraints will capture it.
+    Notes:
+    - This does not guarantee feasibility in all cases, but it dramatically improves it.
+    - Deterministic: no randomness inside repair.
     """
     n_robots = _n_robots(cfg)
     n_tasks = _n_tasks(cfg)
 
+    robots_cfg = cfg.get("robots", {})
+    battery_capacity = float(robots_cfg.get("battery_capacity", 0.0))
+    energy_per_step = float(robots_cfg.get("energy_per_step", 1.0))
+
+    if battery_capacity <= 0:
+        raise ValueError("warehouse_fleet.robots.battery_capacity must be > 0")
+    if energy_per_step <= 0:
+        raise ValueError("warehouse_fleet.robots.energy_per_step must be > 0")
+
     if not isinstance(decision, dict):
         raise TypeError("Decision must be a dict")
 
-    assignments = decision.get("assignments", None)
-    if assignments is None:
-        # Initialize with empty lists so the decision is always simulate-able.
+    assignments_raw = decision.get("assignments", None)
+    if assignments_raw is None:
         out = dict(decision)
         out["assignments"] = [[] for _ in range(n_robots)]
         return out
 
-    if not isinstance(assignments, list):
+    if not isinstance(assignments_raw, list):
         raise TypeError("Decision['assignments'] must be list[list[int]]")
 
-    # Fix outer length
+    # ----------------------------
+    # 1) Shape + range sanitize
+    # ----------------------------
     fixed: List[List[int]] = []
     for r in range(n_robots):
-        if r < len(assignments) and isinstance(assignments[r], list):
-            seq = []
-            for t in assignments[r]:
+        if r < len(assignments_raw) and isinstance(assignments_raw[r], list):
+            seq: List[int] = []
+            for t in assignments_raw[r]:
                 try:
                     tid = int(t)
                 except Exception:  # noqa: BLE001
@@ -222,7 +234,142 @@ def repair_decision(cfg: Dict[str, Any], decision: Dict[str, Any]) -> Dict[str, 
         else:
             fixed.append([])
 
-    # Keep any extra keys untouched
+    # ----------------------------
+    # 2) Optional uniqueness + fill missing tasks
+    # ----------------------------
+    sampling_cfg = cfg.get("sampling", {})
+    # default True because your constraints already encourage uniqueness;
+    # set to false if you want planners to explore duplicates.
+    enforce_unique = bool(sampling_cfg.get("enforce_unique", True))
+
+    if enforce_unique and n_tasks > 0:
+        seen = set()
+        for r in range(n_robots):
+            new_seq: List[int] = []
+            for tid in fixed[r]:
+                if tid not in seen:
+                    seen.add(tid)
+                    new_seq.append(tid)
+            fixed[r] = new_seq
+
+        missing = [tid for tid in range(n_tasks) if tid not in seen]
+        if missing:
+            # Put missing tasks on the currently "lightest" robot by route length proxy.
+            task_locs = _get_tasks_locations(cfg)
+            starts = _get_robot_starts(cfg)
+
+            def route_dist(r: int) -> int:
+                pos = starts[r]
+                d = 0
+                for tid in fixed[r]:
+                    nxt = task_locs[tid]
+                    d += _manhattan(pos, nxt)
+                    pos = nxt
+                return d
+
+            for tid in missing:
+                r_best = min(range(n_robots), key=route_dist)
+                fixed[r_best].append(tid)
+                seen.add(tid)
+
+    # If we can't estimate distances (e.g., no tasks), stop here
+    if n_tasks == 0:
+        out = dict(decision)
+        out["assignments"] = fixed
+        return out
+
+    # ----------------------------
+    # 3) Battery-aware rebalancing
+    # ----------------------------
+    task_locs = _get_tasks_locations(cfg)
+    starts = _get_robot_starts(cfg)
+
+    def route_distance(start, route: List[int]) -> int:
+        pos = start
+        d = 0
+        for tid in route:
+            nxt = task_locs[tid]
+            d += _manhattan(pos, nxt)
+            pos = nxt
+        return d
+
+    def route_energy(r: int) -> float:
+        return float(route_distance(starts[r], fixed[r])) * float(energy_per_step)
+
+    def cheapest_insertion_index(r: int, tid: int) -> int:
+        """
+        Insert tid into robot r route where it increases distance the least.
+        Deterministic tie-break: smallest index.
+        """
+        route = fixed[r]
+        if not route:
+            return 0
+
+        best_i = 0
+        best_delta = None
+        for i in range(len(route) + 1):
+            prev_loc = starts[r] if i == 0 else task_locs[route[i - 1]]
+            next_loc = None if i == len(route) else task_locs[route[i]]
+
+            added = _manhattan(prev_loc, task_locs[tid])
+            removed = 0
+            if next_loc is not None:
+                added += _manhattan(task_locs[tid], next_loc)
+                removed = _manhattan(prev_loc, next_loc)
+
+            delta = added - removed
+            if best_delta is None or delta < best_delta:
+                best_delta = delta
+                best_i = i
+        return best_i
+
+    # Move tasks out of overloaded robots into underloaded robots
+    max_moves = n_tasks * 5
+    for _ in range(max_moves):
+        energies = [route_energy(r) for r in range(n_robots)]
+        overload = [energies[r] - battery_capacity for r in range(n_robots)]
+
+        r_over = max(range(n_robots), key=lambda r: overload[r])
+        if overload[r_over] <= 0.0:
+            break  # all feasible by energy proxy
+
+        r_under = min(range(n_robots), key=lambda r: overload[r])
+        if r_over == r_under:
+            break
+        if not fixed[r_over]:
+            break
+
+        # pick task to remove from overloaded robot: maximize distance reduction
+        base_dist = route_distance(starts[r_over], fixed[r_over])
+        best_tid = None
+        best_gain = None
+
+        for idx, tid in enumerate(fixed[r_over]):
+            new_route = fixed[r_over][:idx] + fixed[r_over][idx + 1 :]
+            new_dist = route_distance(starts[r_over], new_route)
+            gain = base_dist - new_dist
+            if best_gain is None or gain > best_gain:
+                best_gain = gain
+                best_tid = tid
+
+        if best_tid is None:
+            break
+
+        # remove it
+        fixed[r_over].remove(best_tid)
+
+        # insert into underloaded robot (cheapest insertion)
+        ins = cheapest_insertion_index(r_under, best_tid)
+        fixed[r_under].insert(ins, best_tid)
+
+        # stop if we didn't reduce maximum overload (avoid loops)
+        new_energies = [route_energy(r) for r in range(n_robots)]
+        if max(new_energies) >= max(energies):
+            # revert and stop
+            fixed[r_under].pop(ins)
+            fixed[r_over].append(best_tid)
+            break
+
     out = dict(decision)
     out["assignments"] = fixed
     return out

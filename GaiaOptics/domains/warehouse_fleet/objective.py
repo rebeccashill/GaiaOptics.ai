@@ -10,7 +10,7 @@ Design goals (accelerator-friendly, interpretable):
   - Optional secondary terms:
       * makespan proxy (total distance)
       * soft constraint penalties
-  - Do NOT handle hard feasibility here (core FeasibilityReport already does that)
+  - Do NOT handle hard feasibility here (core feasibility is handled elsewhere)
 
 Score convention:
   Lower score is better.
@@ -19,10 +19,27 @@ Score convention:
 from __future__ import annotations
 
 import inspect
-import inspect
 from typing import Any, Dict, Sequence
 
 from gaiaoptics.core.types import ConstraintResult, ObjectiveResult, Severity
+
+
+def _as_float(x: Any, default: float = 0.0) -> float:
+    try:
+        if x is None:
+            return float(default)
+        return float(x)
+    except Exception:
+        return float(default)
+
+
+def _as_int(x: Any, default: int = 0) -> int:
+    try:
+        if x is None:
+            return int(default)
+        return int(x)
+    except Exception:
+        return int(default)
 
 
 def evaluate(
@@ -38,52 +55,44 @@ def evaluate(
             + alpha * distance_total
             + beta * soft_constraint_penalties
     """
-
-    # ----------------------------
     # Primary term: energy
-    # ----------------------------
-    energy = float(traces.get("energy_used", 0.0))
+    energy = _as_float(traces.get("energy_used", 0.0), 0.0)
 
-    # ----------------------------
-    # Secondary: distance proxy (optional)
-    # ----------------------------
-    distance = float(traces.get("distance_total", 0.0))
+    # Secondary: distance proxy
+    distance = _as_float(traces.get("distance_total", 0.0), 0.0)
 
+    # Config weights (domain-local; safe if absent)
     obj_cfg = cfg.get("objective", {})
-    alpha = float(obj_cfg.get("distance_weight", 0.0))  # default: ignore distance
-    beta = float(obj_cfg.get("soft_penalty_weight", 10.0))
+    if not isinstance(obj_cfg, dict):
+        obj_cfg = {}
 
-    # ----------------------------
-    # Soft constraint penalties
-    # ----------------------------
+    alpha = _as_float(obj_cfg.get("distance_weight", 0.0), 0.0)      # default ignore distance
+    beta = _as_float(obj_cfg.get("soft_penalty_weight", 10.0), 10.0) # default penalize soft violations
+
+    # Soft constraint penalties (sum of magnitudes of negative margins)
     soft_penalty = 0.0
     for c in constraints:
-        if c.severity == Severity.SOFT and c.margin < 0.0:
-            # margin < 0 means violation
-            soft_penalty += -float(c.margin)
+        if c.severity == Severity.SOFT:
+            margin = _as_float(getattr(c, "margin", 0.0), 0.0)
+            if margin < 0.0:
+                soft_penalty += -margin
 
-    # ----------------------------
-    # Final score
-    # ----------------------------
     score = energy + alpha * distance + beta * soft_penalty
 
     metrics = {
-        # Core metric (what you’ll highlight in accelerator narrative)
-        "energy_used": energy,
-        # Supporting metrics
-        "distance_total": distance,
-        "soft_penalty": soft_penalty,
+        "energy_used": float(energy),
+        "distance_total": float(distance),
+        "soft_penalty": float(soft_penalty),
+        "tasks_completed": _as_int(traces.get("tasks_completed", 0), 0),
+        "task_completion_rate": _as_float(traces.get("task_completion_rate", 0.0), 0.0),
+        "robot_battery_min": _as_float(traces.get("robot_battery_min", 0.0), 0.0),
         "score": float(score),
-        "tasks_completed": int(traces.get("tasks_completed", 0)),
-        "task_completion_rate": float(traces.get("task_completion_rate", 0.0)),
-        "robot_battery_min": float(traces.get("robot_battery_min", 0.0)),
     }
 
+    # Support different ObjectiveResult schemas across versions
     result_kwargs: Dict[str, Any] = {"score": float(score)}
     ctor_params = inspect.signature(ObjectiveResult).parameters
-
-    # Support different ObjectiveResult schemas across versions
-    for field_name in ("metrics", "details", "meta"):
+    for field_name in ("metrics", "details", "meta", "components"):
         if field_name in ctor_params:
             result_kwargs[field_name] = metrics
             break

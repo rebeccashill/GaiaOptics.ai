@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import argparse
 from pathlib import Path
+from random import seed
 from typing import Any, Dict, List, Sequence, Tuple
 
 from gaiaoptics.core.config import load_yaml, normalize_config, validate_config
@@ -26,6 +27,17 @@ def _objective_totals(obj: ObjectiveResult) -> Tuple[float, float]:
     cost = float(comps.get("energy_cost", 0.0))
     emissions = float(comps.get("emissions_kg", 0.0))
     return cost, emissions
+
+def _objective_metrics(obj: ObjectiveResult) -> Dict[str, Any]:
+    """
+    Warehouse Fleet stores metrics under ObjectiveResult.<metrics|details|meta>
+    depending on the core schema. This helper safely extracts it.
+    """
+    for attr in ("metrics", "details", "meta", "components"):
+        v = getattr(obj, attr, None)
+        if isinstance(v, dict):
+            return v
+    return {}
 
 
 def run_microgrid(normalized_cfg: Dict[str, Any]) -> RunArtifacts:
@@ -608,9 +620,10 @@ def run_water_network(normalized_cfg: Dict[str, Any]) -> RunArtifacts:
 def run_warehouse_fleet(normalized_cfg: Dict[str, Any]) -> RunArtifacts:
     """
     Phase 2 runner for warehouse_fleet:
-    - uses domains.warehouse_fleet.mission.build_problem(cfg)
+    - builds Problem via domains.warehouse_fleet.mission.build_problem(cfg)
     - baseline + improved decisions are simulated, constrained, and scored
     - decisions must include: {"assignments": list[list[int]]}
+    - warehouse_fleet currently reports energy + distance (not $ cost / CO2)
     """
     from gaiaoptics.domains.warehouse_fleet.mission import build_problem as build_warehouse_fleet_problem
 
@@ -619,38 +632,74 @@ def run_warehouse_fleet(normalized_cfg: Dict[str, Any]) -> RunArtifacts:
 
     problem = build_warehouse_fleet_problem(normalized_cfg)
     seed = int(scenario.get("seed", 0))
+    n = int(problem.time.n_steps)
+
+    def _as_float(x: Any, default: float = 0.0) -> float:
+        try:
+            if x is None:
+                return float(default)
+            return float(x)
+        except Exception:
+            return float(default)
+
+    def _fmt(x: Any, fmt: str, default: str = "—") -> str:
+        if x is None:
+            return default
+        try:
+            return format(float(x), fmt)
+        except Exception:
+            return default
+
+    def _objective_scalar(obj: ObjectiveResult) -> float:
+        """
+        Compare candidates by scalar objective.
+        Prefer .value then .score; else +inf.
+        """
+        for attr in ("value", "score"):
+            v = getattr(obj, attr, None)
+            if isinstance(v, (int, float)):
+                return float(v)
+            if isinstance(v, str) and v.strip():
+                try:
+                    return float(v)
+                except Exception:
+                    pass
+        return float("inf")
 
     def _safe_eval(decision: Dict[str, Any]):
         """
-        Returns (traces, cons, obj, feas, worst_name, worst_margin)
-        If simulate blows up, treat as infeasible with empty artifacts.
+        Returns tuple:
+          (decision, traces, constraints, objective, feasible, worst_name, worst_margin)
+        If simulate blows up, returns infeasible placeholders.
         """
         try:
             dec = decision
             if problem.repair_decision_fn:
                 dec = problem.repair_decision_fn(dec)
+
             tr = problem.simulate_fn(dec)
             cons = problem.constraints_fn(tr, dec)
             obj = problem.objective_fn(tr, cons, dec)
             feas, worst_name, worst_margin = _feasibility_from_constraints(cons)
             return dec, tr, cons, obj, feas, worst_name, worst_margin
+
         except Exception:
-            # Treat any bad decision as infeasible; keep it truthful (no fake numbers)
-            empty_tr: Dict[str, Any] = {"t": list(range(int(problem.time.n_steps)))}
+            empty_tr: Dict[str, Any] = {"t": list(range(n))}
             empty_cons: List[ConstraintResult] = []
-            empty_obj = ObjectiveResult(score=float("inf"), components={})
+            try:
+                empty_obj = ObjectiveResult(value=float("inf"), components={})  # type: ignore[arg-type]
+            except TypeError:
+                empty_obj = ObjectiveResult(score=float("inf"), components={})  # type: ignore[arg-type]
             return decision, empty_tr, empty_cons, empty_obj, False, "exception", None
 
-    def _obj_scalar(obj: ObjectiveResult) -> float:
-        v = getattr(obj, "value", None)
-        if isinstance(v, (int, float)):
-            return float(v)
-        comps = obj.components or {}
-        # fallback to energy_cost if domain uses components
-        return float(comps.get("energy_cost", float("inf")))
+    def _energy_distance_from_traces(tr: Dict[str, Any]) -> Tuple[float, float]:
+        return (
+            _as_float(tr.get("energy_used", 0.0), 0.0),
+            _as_float(tr.get("distance_total", 0.0), 0.0),
+        )
 
     # ----------------------------
-    # Baseline: sample/repair at seed
+    # Baseline
     # ----------------------------
     if not problem.sample_decision_fn:
         raise ConfigError(
@@ -661,61 +710,75 @@ def run_warehouse_fleet(normalized_cfg: Dict[str, Any]) -> RunArtifacts:
 
     base_dec0 = problem.sample_decision_fn(seed)
     base_dec, base_tr, base_cons, base_obj, base_feas, base_worst_name, base_worst_margin = _safe_eval(base_dec0)
-    base_cost, base_em = _objective_totals(base_obj)
+
+    base_energy, base_distance = _energy_distance_from_traces(base_tr if isinstance(base_tr, dict) else {})
+    base_score = _objective_scalar(base_obj)
 
     # ----------------------------
-    # Improved: evaluate a few sampled candidates, pick best feasible
+    # Improved: try a few deterministic seeds, pick best feasible then lowest score
     # ----------------------------
     best = (base_dec, base_tr, base_cons, base_obj, base_feas, base_worst_name, base_worst_margin)
 
-    # Try a few deterministic seeds; increase count later if you want.
-    for s in (seed + 1, seed + 2, seed + 3):
+    iters = int(planner.get("iterations", 200))
+    # sample iters candidates deterministically
+    for k in range(1, iters + 1):
+        s = seed + k
         cand0 = problem.sample_decision_fn(s)
         cand = _safe_eval(cand0)
 
         _, _, _, cand_obj, cand_feas, _, _ = cand
         _, _, _, best_obj, best_feas, _, _ = best
 
-        # Prefer feasible over infeasible; then lower objective scalar
         if cand_feas and not best_feas:
             best = cand
-        elif cand_feas == best_feas and _obj_scalar(cand_obj) < _obj_scalar(best_obj):
+        elif cand_feas == best_feas and _objective_scalar(cand_obj) < _objective_scalar(best_obj):
             best = cand
 
     imp_dec, imp_tr, imp_cons, imp_obj, imp_feas, imp_worst_name, imp_worst_margin = best
-    imp_cost, imp_em = _objective_totals(imp_obj)
 
-    delta_cost = base_cost - imp_cost
-    delta_em = base_em - imp_em
-    cost_pct = (delta_cost / base_cost * 100.0) if base_cost else 0.0
-    em_pct = (delta_em / base_em * 100.0) if base_em else 0.0
+    imp_energy, imp_distance = _energy_distance_from_traces(imp_tr if isinstance(imp_tr, dict) else {})
+    imp_score = _objective_scalar(imp_obj)
+
+    delta_energy = base_energy - imp_energy
+    delta_distance = base_distance - imp_distance
+    energy_pct = (delta_energy / base_energy * 100.0) if base_energy else 0.0
+    dist_pct = (delta_distance / base_distance * 100.0) if base_distance else 0.0
 
     # ----------------------------
-    # Traces rows: best-effort from traces dict
+    # Traces rows: minimal stable CSV
     # ----------------------------
-    n = int(problem.time.n_steps)
-    t_series = imp_tr.get("t", list(range(n))) if isinstance(imp_tr, dict) else list(range(n))
+    t_series_raw = imp_tr.get("t") if isinstance(imp_tr, dict) else None
+    if isinstance(t_series_raw, list) and len(t_series_raw) == n:
+        try:
+            t_series = [int(float(x)) for x in t_series_raw]
+        except Exception:
+            t_series = list(range(n))
+    else:
+        t_series = list(range(n))
 
-    # Keep minimal stable CSV; add columns if your sim provides them
-    traces_rows: List[Dict[str, Any]] = []
-    for i in range(n):
-        traces_rows.append(
-            {
-                "t": int(t_series[i]) if isinstance(t_series, list) and i < len(t_series) else i,
-            }
-        )
+    traces_rows: List[Dict[str, Any]] = [{"t": t_series[i]} for i in range(n)]
 
     solution: Dict[str, Any] = {
         "scenario": scenario["name"],
         "domain": scenario.get("domain", "warehouse_fleet"),
 
-        "baseline": {"cost": float(base_cost), "emissions": float(base_em), "feasible": bool(base_feas)},
-        "improved": {"cost": float(imp_cost), "emissions": float(imp_em), "feasible": bool(imp_feas)},
+        "baseline": {
+            "energy_used": float(base_energy),
+            "distance_total": float(base_distance),
+            "score": float(base_score),
+            "feasible": bool(base_feas),
+        },
+        "improved": {
+            "energy_used": float(imp_energy),
+            "distance_total": float(imp_distance),
+            "score": float(imp_score),
+            "feasible": bool(imp_feas),
+        },
         "delta": {
-            "cost": float(delta_cost),
-            "emissions": float(delta_em),
-            "cost_percent_reduction": float(cost_pct),
-            "emissions_percent_reduction": float(em_pct),
+            "energy_used": float(delta_energy),
+            "energy_percent_reduction": float(energy_pct),
+            "distance_total": float(delta_distance),
+            "distance_percent_reduction": float(dist_pct),
         },
 
         "feasibility": {
@@ -725,7 +788,12 @@ def run_warehouse_fleet(normalized_cfg: Dict[str, Any]) -> RunArtifacts:
         },
 
         "constraints": [
-            {"name": c.name, "severity": str(c.severity.name), "worst_margin": float(c.margin), "details": (c.details or {})}
+            {
+                "name": c.name,
+                "severity": str(c.severity.name),
+                "worst_margin": float(c.margin),
+                "details": (c.details or {}),
+            }
             for c in imp_cons
         ],
 
@@ -746,29 +814,32 @@ def run_warehouse_fleet(normalized_cfg: Dict[str, Any]) -> RunArtifacts:
         },
     }
 
-    # Phase 1 compatibility keys
+    # Phase 1 compatibility keys (truthful mapping)
     solution["feasible"] = bool(solution["feasibility"]["feasible"])
     solution["worst_hard_margin"] = float(solution["feasibility"]["worst_hard_margin"] or 0.0)
-    solution["total_cost"] = float(solution["improved"]["cost"])
-    solution["total_emissions"] = float(solution["improved"]["emissions"])
-    solution["baseline_total_cost"] = float(solution["baseline"]["cost"])
-    solution["baseline_total_emissions"] = float(solution["baseline"]["emissions"])
+
+    # Microgrid-era names: map "cost" -> energy proxy; emissions not modeled
+    solution["total_cost"] = float(solution["improved"]["energy_used"])
+    solution["baseline_total_cost"] = float(solution["baseline"]["energy_used"])
+    solution["total_emissions"] = 0.0
+    solution["baseline_total_emissions"] = 0.0
 
     report_md = (
-        f"# Warehouse Fleet Report — {scenario['name']}\n\n"
+        f"# Warehouse Fleet Report — {scenario.get('name', 'scenario')}\n\n"
         "## Summary\n\n"
-        f"- Feasible: {'✅' if solution['feasibility']['feasible'] else '❌'}\n\n"
-        "## Cost\n"
-        f"- Baseline: ${solution['baseline']['cost']:.2f}\n"
-        f"- Improved: ${solution['improved']['cost']:.2f}\n"
-        f"- Reduction: ${solution['delta']['cost']:.2f} ({solution['delta']['cost_percent_reduction']:.1f}%)\n\n"
-        "## Emissions\n"
-        f"- Baseline: {solution['baseline']['emissions']:.2f} kgCO2\n"
-        f"- Improved: {solution['improved']['emissions']:.2f} kgCO2\n"
-        f"- Reduction: {solution['delta']['emissions']:.2f} ({solution['delta']['emissions_percent_reduction']:.1f}%)\n\n"
+        f"- Feasible: {'✅' if solution['feasibility']['feasible'] else '❌'}\n"
+        f"- Score: {_fmt(solution.get('improved', {}).get('score'), '.6g')}\n\n"
+        "## Energy\n"
+        f"- Baseline: {_fmt(solution.get('baseline', {}).get('energy_used'), '.3f')}\n"
+        f"- Improved: {_fmt(solution.get('improved', {}).get('energy_used'), '.3f')}\n"
+        f"- Reduction: {_fmt(solution.get('delta', {}).get('energy_used'), '.3f')} ({_fmt(solution.get('delta', {}).get('energy_percent_reduction'), '.1f')}%)\n\n"
+        "## Distance\n"
+        f"- Baseline: {_fmt(solution.get('baseline', {}).get('distance_total'), '.3f')}\n"
+        f"- Improved: {_fmt(solution.get('improved', {}).get('distance_total'), '.3f')}\n"
+        f"- Reduction: {_fmt(solution.get('delta', {}).get('distance_total'), '.3f')} ({_fmt(solution.get('delta', {}).get('distance_percent_reduction'), '.1f')}%)\n\n"
         "## Constraint Health\n"
-        f"- Worst hard constraint: {solution['feasibility']['worst_hard_constraint']}\n"
-        f"- Worst hard margin: {solution['feasibility']['worst_hard_margin']:.6g}\n"
+        f"- Worst hard constraint: {solution.get('feasibility', {}).get('worst_hard_constraint')}\n"
+        f"- Worst hard margin: {_fmt(solution.get('feasibility', {}).get('worst_hard_margin'), '.6g')}\n"
     )
 
     return RunArtifacts(
