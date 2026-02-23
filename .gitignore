@@ -1,20 +1,16 @@
-# Byte-compiled / optimized / DLL files
+# ---------------------------
+# Python
+# ---------------------------
 __pycache__/
 *.py[cod]
 *$py.class
-
-# C extensions
 *.so
 
-# Distribution / packaging
+# Packaging
 build/
 dist/
 *.egg-info/
 .eggs/
-
-# Installer logs
-pip-log.txt
-pip-delete-this-directory.txt
 
 # Virtual environments
 .venv/
@@ -22,23 +18,25 @@ venv/
 env/
 ENV/
 
-# VSCode
-.vscode/
+# Testing
+.pytest_cache/
+.coverage
+htmlcov/
 
-# PyCharm
+# Editors
+.vscode/
 .idea/
 
-# MacOS
+# OS
 .DS_Store
-
-# Windows
 Thumbs.db
 
-# Generated outputs (core rule)
+# ---------------------------
+# GaiaOptics Generated Artifacts
+# ---------------------------
 outputs/
-
-# Generated plots
 plots/
-
-# Temporary experiment runs
 experiments/tmp/
+
+# Logs
+*.log
