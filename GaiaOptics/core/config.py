@@ -1,8 +1,6 @@
 # gaiaoptics/core/config.py
 from __future__ import annotations
 
-from dataclasses import dataclass
-from os import error
 from pathlib import Path
 from typing import Any, Dict, Mapping, Optional, Sequence, Tuple
 import difflib
@@ -12,7 +10,8 @@ import yaml
 from gaiaoptics.core.errors import ConfigError
 
 
-CANONICAL_TOP_LEVEL_KEYS = ("scenario", "run", "planner", "objectives", "microgrid", "data_center", "water_network")
+CANONICAL_TOP_LEVEL_KEYS = ("scenario", "run", "planner", "objectives", "microgrid", "data_center", "water_network", "warehouse_fleet")
+SUPPORTED_DOMAINS = ("microgrid", "data_center", "water_network", "warehouse_fleet")
 
 def _domain_from_cfg(cfg: Mapping[str, Any]) -> str | None:
     # Preferred schema
@@ -139,6 +138,7 @@ def normalize_config(raw: Mapping[str, Any], *, source_path: Optional[Path] = No
     microgrid = _as_dict(raw.get("microgrid"), "microgrid")
     data_center = _as_dict(raw.get("data_center"), "data_center")
     water_network = _as_dict(raw.get("water_network"), "water_network")
+    warehouse_fleet = _as_dict(raw.get("warehouse_fleet"), "warehouse_fleet")
 
     # allow some older shapes like top-level "seed", "horizon_hours", etc.
     if "seed" in raw and "seed" not in scenario:
@@ -233,6 +233,10 @@ def normalize_config(raw: Mapping[str, Any], *, source_path: Optional[Path] = No
         _fold_top_level_into(water_network, ["horizon", "series", "tank", "pump"])
         _derive_horizon(water_network)
         water_network.setdefault("name", scenario["name"])
+    
+    elif dom == "warehouse_fleet":
+        _fold_top_level_into(warehouse_fleet, ["horizon_steps", "grid", "robots", "tasks"])
+        warehouse_fleet.setdefault("name", scenario["name"])
 
     # Build canonical dict with stable insertion order
     normalized: Dict[str, Any] = {
@@ -243,6 +247,7 @@ def normalize_config(raw: Mapping[str, Any], *, source_path: Optional[Path] = No
         "microgrid": microgrid,
         "data_center": data_center,
         "water_network": water_network,
+        "warehouse_fleet": warehouse_fleet,
     }
 
     return normalized
@@ -252,12 +257,12 @@ def validate_config(cfg: Mapping[str, Any]) -> None:
     """
     Friendly validation.
 
-    Phase 1: strict microgrid golden path
-    Phase 2: allow additional domains, still strict per-domain
+    Contract: validate the *normalized* config shape:
+      scenario/run/planner/objectives/<domain payloads>
     """
     cfg = _as_dict(cfg, "cfg")
 
-    # ✅ FIRST: unknown top-level keys with hints (do this ONCE)
+    # Unknown top-level keys with hints
     for k in cfg.keys():
         if k not in CANONICAL_TOP_LEVEL_KEYS:
             suggestion = _suggest_key(k, CANONICAL_TOP_LEVEL_KEYS)
@@ -271,30 +276,19 @@ def validate_config(cfg: Mapping[str, Any]) -> None:
     # Required
     _require_str(scenario, "name", "scenario")
 
-    SUPPORTED_DOMAINS = {"microgrid", "data_center", "water_network"}
-
-    # Default to microgrid if not specified (backward compatible)
-    dom = scenario.get("domain", "microgrid")
-    scenario["domain"] = dom
-
-    SUPPORTED_DOMAINS = {"microgrid", "data_center", "water_network"}
-
-    dom = _domain_from_cfg(cfg) or "microgrid"
-    if not isinstance(dom, str) or not dom:
-        raise ConfigError("domain", "missing/invalid domain (expected string or {name: ...})")
+    # Resolve domain once (supports: scenario.domain as str or {name: ...})
+    dom = _domain_from_cfg(cfg) or scenario.get("domain") or "microgrid"
+    if isinstance(dom, dict):
+        dom = dom.get("name")
+    if not isinstance(dom, str) or not dom.strip():
+        raise ConfigError("scenario.domain", "missing/invalid domain (expected string or {name: ...})")
+    dom = dom.strip()
 
     if dom not in SUPPORTED_DOMAINS:
-        raise ConfigError("domain", f"unsupported domain: {dom}")
+        raise ConfigError("scenario.domain", f"unsupported domain: {dom}")
 
-    # ensure scenario.domain is canonical
-    scenario = _as_dict(cfg.get("scenario"), "scenario")
+    # Canonicalize (optional, but consistent with your current behavior)
     scenario["domain"] = dom
-
-    if not isinstance(dom, str) or not dom:
-        raise ConfigError("domain","missing/invalid domain (expected string or {name: ...})")
-
-    if dom not in SUPPORTED_DOMAINS:
-        raise ConfigError("domain", f"unsupported domain: {dom}")
 
     # Type checks
     seed = scenario.get("seed")
@@ -305,9 +299,7 @@ def validate_config(cfg: Mapping[str, Any]) -> None:
     if not isinstance(iters, int) or iters < 0:
         raise ConfigError("planner.iterations", "must be a non-negative integer")
 
-    # -------------------------
     # Domain-specific validation
-    # -------------------------
     if dom == "microgrid":
         horizon = run.get("horizon_hours")
         if not isinstance(horizon, (int, float)) or float(horizon) <= 0:
@@ -317,13 +309,9 @@ def validate_config(cfg: Mapping[str, Any]) -> None:
         if not isinstance(ts, (int, float)) or float(ts) <= 0:
             raise ConfigError("run.timestep_minutes", "must be a positive number")
 
-        # (Optional) ensure microgrid payload exists
-        # _as_dict(cfg.get("microgrid"), "microgrid")
-
     elif dom == "data_center":
         dc = _as_dict(cfg.get("data_center"), "data_center")
 
-        # Accept either data_center.horizon or (fallback) top-level horizon
         dc_horizon = dc.get("horizon")
         if isinstance(dc_horizon, dict):
             horizon_obj = dc_horizon
@@ -337,46 +325,82 @@ def validate_config(cfg: Mapping[str, Any]) -> None:
         n_steps = horizon.get("n_steps")
         if n_steps is None:
             raise ConfigError(f"{horizon_path}.n_steps", "must be a positive integer (got None)")
-
-        # Normalize n_steps robustly (accept "24" or 24.0)
         try:
             n_steps_i = int(n_steps)
         except Exception:
             raise ConfigError(f"{horizon_path}.n_steps", f"must be a positive integer (got {n_steps!r})")
-
         if n_steps_i <= 0:
             raise ConfigError(f"{horizon_path}.n_steps", f"must be a positive integer (got {n_steps_i})")
 
         dt_hours = horizon.get("dt_hours")
         if not isinstance(dt_hours, (int, float)) or float(dt_hours) <= 0:
             raise ConfigError(f"{horizon_path}.dt_hours", f"must be a positive number (got {dt_hours!r})")
+
     elif dom == "water_network":
         wn = _as_dict(cfg.get("water_network"), "water_network")
-
-        # Validate horizon
         horizon = _as_dict(wn.get("horizon"), "water_network.horizon")
 
         n_steps = horizon.get("n_steps")
         if n_steps is None:
             raise ConfigError("water_network.horizon.n_steps", "must be a positive integer (got None)")
-
         try:
             n_steps_i = int(n_steps)
         except Exception:
-            raise ConfigError(
-                "water_network.horizon.n_steps",
-                f"must be a positive integer (got {n_steps!r})",
-            )
-
+            raise ConfigError("water_network.horizon.n_steps", f"must be a positive integer (got {n_steps!r})")
         if n_steps_i <= 0:
-            raise ConfigError(
-                "water_network.horizon.n_steps",
-                f"must be a positive integer (got {n_steps_i})",
-            )
+            raise ConfigError("water_network.horizon.n_steps", f"must be a positive integer (got {n_steps_i})")
 
         dt_hours = horizon.get("dt_hours")
         if not isinstance(dt_hours, (int, float)) or float(dt_hours) <= 0:
-            raise ConfigError(
-                "water_network.horizon.dt_hours",
-                f"must be a positive number (got {dt_hours!r})",
-            )
+            raise ConfigError("water_network.horizon.dt_hours", f"must be a positive number (got {dt_hours!r})")
+
+    elif dom == "warehouse_fleet":
+        wf = _as_dict(cfg.get("warehouse_fleet"), "warehouse_fleet")
+
+        horizon_steps = wf.get("horizon_steps")
+        if horizon_steps is None:
+            raise ConfigError("warehouse_fleet.horizon_steps", "must be a positive integer (got None)")
+        try:
+            horizon_i = int(horizon_steps)
+        except Exception:
+            raise ConfigError("warehouse_fleet.horizon_steps", f"must be a positive integer (got {horizon_steps!r})")
+        if horizon_i <= 0:
+            raise ConfigError("warehouse_fleet.horizon_steps", f"must be a positive integer (got {horizon_i})")
+
+        grid = _as_dict(wf.get("grid"), "warehouse_fleet.grid")
+        width = grid.get("width")
+        height = grid.get("height")
+        if not isinstance(width, (int, float)) or int(width) <= 0:
+            raise ConfigError("warehouse_fleet.grid.width", f"must be a positive integer (got {width!r})")
+        if not isinstance(height, (int, float)) or int(height) <= 0:
+            raise ConfigError("warehouse_fleet.grid.height", f"must be a positive integer (got {height!r})")
+
+        robots = _as_dict(wf.get("robots"), "warehouse_fleet.robots")
+        r_count = robots.get("count")
+        if r_count is None:
+            raise ConfigError("warehouse_fleet.robots.count", "must be a positive integer (got None)")
+        try:
+            r_count_i = int(r_count)
+        except Exception:
+            raise ConfigError("warehouse_fleet.robots.count", f"must be a positive integer (got {r_count!r})")
+        if r_count_i <= 0:
+            raise ConfigError("warehouse_fleet.robots.count", f"must be a positive integer (got {r_count_i})")
+
+        battery_capacity = robots.get("battery_capacity")
+        if not isinstance(battery_capacity, (int, float)) or float(battery_capacity) <= 0:
+            raise ConfigError("warehouse_fleet.robots.battery_capacity", f"must be a positive number (got {battery_capacity!r})")
+
+        energy_per_step = robots.get("energy_per_step")
+        if not isinstance(energy_per_step, (int, float)) or float(energy_per_step) <= 0:
+            raise ConfigError("warehouse_fleet.robots.energy_per_step", f"must be a positive number (got {energy_per_step!r})")
+
+        tasks = _as_dict(wf.get("tasks"), "warehouse_fleet.tasks")
+        t_count = tasks.get("count")
+        if t_count is None:
+            raise ConfigError("warehouse_fleet.tasks.count", "must be a non-negative integer (got None)")
+        try:
+            t_count_i = int(t_count)
+        except Exception:
+            raise ConfigError("warehouse_fleet.tasks.count", f"must be a non-negative integer (got {t_count!r})")
+        if t_count_i < 0:
+            raise ConfigError("warehouse_fleet.tasks.count", f"must be a non-negative integer (got {t_count_i})")

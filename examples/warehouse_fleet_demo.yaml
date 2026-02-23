@@ -3,6 +3,7 @@ domain: warehouse_fleet
 
 warehouse_fleet:
   seed: 7
+  horizon_steps: 200
   grid:
     width: 30
     height: 20
