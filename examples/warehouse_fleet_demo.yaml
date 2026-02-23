@@ -19,6 +19,9 @@ warehouse_fleet:
     count: 120
     locations: "random"  # or explicit list
 
+  sampling:
+    strategy: "greedy_nearest"   # ensures energy-efficient routes → feasible
+
   charging:
     stations: [[2,2], [27,2], [2,17], [27,17]]
     charge_rate: 5.0
