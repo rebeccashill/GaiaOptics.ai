@@ -29,7 +29,7 @@ def _objective_totals(obj: ObjectiveResult) -> Tuple[float, float]:
     emissions = float(comps.get("emissions_kg", 0.0))
     return cost, emissions
 
-def run_microgrid(normalized_cfg: dict) -> RunArtifacts:
+def run_microgrid(normalized_cfg: Dict[str, Any]) -> RunArtifacts:
     """
     Engineering-done microgrid runner (Problem-driven, deterministic).
     Works with both config shapes:
@@ -46,11 +46,11 @@ def run_microgrid(normalized_cfg: dict) -> RunArtifacts:
     # ----------------------------
     mg_cfg = normalized_cfg.get("microgrid")
     if isinstance(mg_cfg, dict) and ("horizon" in mg_cfg or "series" in mg_cfg or "battery" in mg_cfg):
-        payload = dict(mg_cfg)  # already domain-shaped
+        payload: Dict[str, Any] = dict(mg_cfg)  # already domain-shaped
     else:
         # If your YAML is domain-shaped at top-level, normalize_config must preserve these keys.
         # Build payload from top-level normalized_cfg + scenario name.
-        payload = {
+        payload: Dict[str, Any] = {
             "name": str(scenario.get("name", "microgrid")),
         }
         for k in ("horizon", "series", "battery", "grid", "penalties", "options"):
@@ -96,7 +96,7 @@ def run_microgrid(normalized_cfg: dict) -> RunArtifacts:
         price = [0.2] * n
 
     # Infer p_max via repair clamp
-    probe = problem.repair_decision_fn({"battery_power_kw": [1e9] * n})
+    probe = problem.repair_decision_fn({"battery_power_kw": [1e9] * n}) if problem.repair_decision_fn else {"battery_power_kw": [1e9] * n}
     p_max = float(abs(probe["battery_power_kw"][0]))
 
     sorted_p = sorted(float(x) for x in price)
@@ -119,7 +119,8 @@ def run_microgrid(normalized_cfg: dict) -> RunArtifacts:
     # try a few scales
     for scale in (0.6, 0.3, 0.15):
         cand = {"battery_power_kw": schedule(scale * p_max)}
-        cand = problem.repair_decision_fn(cand)
+        if problem.repair_decision_fn:
+            cand = problem.repair_decision_fn(cand)
 
         tr = problem.simulate_fn(cand)
         cons = problem.constraints_fn(tr, cand)
@@ -337,10 +338,12 @@ def run_data_center(normalized_cfg: dict) -> RunArtifacts:
 
     traces_rows: List[Dict[str, Any]] = []
     for i in range(n):
+        t = temps[i]
+        room_temp_c = float(t) if isinstance(t, (int, float, str)) and t != "" else None
         e_kwh = float(grid[i]) * dt
         row = {
             "t": int(t[i]) if isinstance(t, list) and i < len(t) else i,
-            "room_temp_c": float(temps[i]) if temps[i] is not None and temps[i] != "" else None,
+            "room_temp_c": room_temp_c,
             "grid_import_kw": float(grid[i]),
             "cooling_power_kw": float(imp_tr.get("cooling_power_kw", [0.0] * n)[i]),
             "cost": e_kwh * float(price[i]),
@@ -533,11 +536,13 @@ def run_water_network(normalized_cfg: dict) -> RunArtifacts:
 
     traces_rows: List[Dict[str, Any]] = []
     for i in range(n):
+        t = tank[i]
+        tank_level_m3 = float(t) if t not in (None, "", "None") else None
         e_kwh = float(grid[i]) * dt
         traces_rows.append(
             {
                 "t": int(t_series[i]) if isinstance(t_series[i], (int, float)) else None,
-                "tank_level_m3": float(tank[i]) if tank[i] is not None and tank[i] != "" and tank[i] != "None" else None,
+                "tank_level_m3": tank_level_m3,
                 "pump_power_kw": float(imp_tr.get("pump_power_kw", [0.0] * n)[i]),
                 "demand_m3ph": float(imp_tr.get("demand_m3ph", [0.0] * n)[i]),
                 "cost": e_kwh * float(price[i]),
