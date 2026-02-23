@@ -9,7 +9,7 @@ import difflib
 
 import yaml
 
-from gaiaoptics.core.errors import ConfigError
+from GaiaOptics.core.errors import ConfigError
 
 
 CANONICAL_TOP_LEVEL_KEYS = ("scenario", "run", "planner", "objectives", "microgrid", "data_center", "water_network")
@@ -88,6 +88,7 @@ def normalize_config(raw: Mapping[str, Any], *, source_path: Optional[Path] = No
     # domain payloads
     microgrid = _as_dict(raw.get("microgrid"), "microgrid")
     data_center = _as_dict(raw.get("data_center"), "data_center")
+    water_network = _as_dict(raw.get("water_network"), "water_network")
 
     # allow some older shapes like top-level "seed", "horizon_hours", etc.
     if "seed" in raw and "seed" not in scenario:
@@ -177,6 +178,7 @@ def normalize_config(raw: Mapping[str, Any], *, source_path: Optional[Path] = No
         "objectives": objectives,
         "microgrid": microgrid,
         "data_center": data_center,
+        "water_network": water_network,
     }
 
     return normalized
@@ -271,3 +273,33 @@ def validate_config(cfg: Mapping[str, Any]) -> None:
         dt_hours = horizon.get("dt_hours")
         if not isinstance(dt_hours, (int, float)) or float(dt_hours) <= 0:
             raise ConfigError(f"{horizon_path}.dt_hours", f"must be a positive number (got {dt_hours!r})")
+    elif dom == "water_network":
+        wn = _as_dict(cfg.get("water_network"), "water_network")
+
+        # Validate horizon
+        horizon = _as_dict(wn.get("horizon"), "water_network.horizon")
+
+        n_steps = horizon.get("n_steps")
+        if n_steps is None:
+            raise ConfigError("water_network.horizon.n_steps", "must be a positive integer (got None)")
+
+        try:
+            n_steps_i = int(n_steps)
+        except Exception:
+            raise ConfigError(
+                "water_network.horizon.n_steps",
+                f"must be a positive integer (got {n_steps!r})",
+            )
+
+        if n_steps_i <= 0:
+            raise ConfigError(
+                "water_network.horizon.n_steps",
+                f"must be a positive integer (got {n_steps_i})",
+            )
+
+        dt_hours = horizon.get("dt_hours")
+        if not isinstance(dt_hours, (int, float)) or float(dt_hours) <= 0:
+            raise ConfigError(
+                "water_network.horizon.dt_hours",
+                f"must be a positive number (got {dt_hours!r})",
+            )
