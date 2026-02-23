@@ -308,96 +308,161 @@ def run_data_center(normalized_cfg: dict) -> RunArtifacts:
 
 def run_water_network(normalized_cfg: dict) -> RunArtifacts:
     """
-    Phase 2 runner (stub) for water network domain.
-    Produces deterministic placeholder metrics + water_network constraint names.
+    Phase 2 engineering-done runner for water_network:
+    - builds Problem from config
+    - baseline + improved decisions are simulated, constrained, and scored
+    - feasibility + worst constraint derived from HARD margins
+    - traces.csv includes tank_level_m3 for plotting
     """
+    from gaiaoptics.domains.water_network.mission import build_problem_from_config
+
     scenario = normalized_cfg["scenario"]
     planner = normalized_cfg.get("planner", {}) or {}
 
-    baseline_cost = 60.00
-    baseline_emissions = 12.00
-    baseline_feasible = True
+    wn_cfg = normalized_cfg.get("water_network") or {}
+    if not isinstance(wn_cfg, dict):
+        wn_cfg = {}
 
-    improved_cost = 48.00
-    improved_emissions = 9.50
-    improved_feasible = True
+    problem = build_problem_from_config(wn_cfg)
 
-    delta_cost = baseline_cost - improved_cost
-    delta_emissions = baseline_emissions - improved_emissions
+    n = int(problem.time.n_steps)
 
-    cost_pct = (delta_cost / baseline_cost * 100.0) if baseline_cost else 0.0
-    emissions_pct = (delta_emissions / baseline_emissions * 100.0) if baseline_emissions else 0.0
+    # ----------------------------
+    # Baseline: sample/repair
+    # ----------------------------
+    base_dec = problem.sample_decision_fn(int(scenario.get("seed", 0))) if problem.sample_decision_fn else {}
+    base_dec = problem.repair_decision_fn(base_dec) if problem.repair_decision_fn else (base_dec or {})
 
-    worst_hard_margin = 0.18
-    worst_hard_constraint = "pressure_min"
+    base_tr = problem.simulate_fn(base_dec)
+    base_cons = problem.constraints_fn(base_tr, base_dec)
+    base_obj = problem.objective_fn(base_tr, base_cons, base_dec)
 
-        # --- Minimal toy hydraulics for plotting credibility ---
-    wn = (normalized_cfg.get("water_network") or {}) if isinstance(normalized_cfg.get("water_network"), dict) else {}
-    horizon = (wn.get("horizon") or {}) if isinstance(wn.get("horizon"), dict) else {}
+    base_feas, _, _ = _feasibility_from_constraints(base_cons)
+    base_cost, base_em = _objective_totals(base_obj)
 
-    n_steps = int(horizon.get("n_steps", 24))
-    dt_hours = float(horizon.get("dt_hours", 1.0))
+    # ----------------------------
+    # Improved: deterministic heuristic
+    #
+    # Goal: keep tank within bounds by matching average demand.
+    # We infer p_max by clamping a huge value.
+    # Then choose pump power to roughly match demand / (flow_per_kw).
+    # ----------------------------
+    probe = problem.repair_decision_fn({"pump_power_kw": [1e9] * n}) if problem.repair_decision_fn else {"pump_power_kw": [1e9] * n}
+    p_max = float(probe["pump_power_kw"][0])
+    p_max = float(probe["pump_power_kw"][0])
 
-    tank_cfg = (wn.get("tank") or {}) if isinstance(wn.get("tank"), dict) else {}
-    pump_cfg = (wn.get("pump") or {}) if isinstance(wn.get("pump"), dict) else {}
+    demand = base_tr.get("demand_m3ph", [10.0] * n)
+    if not isinstance(demand, list) or len(demand) != n:
+        demand = [10.0] * n
 
-    tank_level_m3 = float(tank_cfg.get("tank0_m3", 50.0))
-    pump_flow_m3ph_per_kw = float(pump_cfg.get("pump_flow_m3ph_per_kw", 1.0))
+    # Infer flow per kW from the sim: flow_in = pump_kw * flow_per_kw
+    # Run a tiny probe step to estimate flow_per_kw.
+    # (Use a constant pump=1 kW and see flow_in_m3ph[0].)
+    probe2_dec = problem.repair_decision_fn({"pump_power_kw": [1.0] * n}) if problem.repair_decision_fn else {"pump_power_kw": [1.0] * n}
+    probe2_tr = problem.simulate_fn(probe2_dec)
+    flow_in = probe2_tr.get("flow_in_m3ph", [1.0] * n)
+    flow_per_kw = float(flow_in[0]) if isinstance(flow_in, list) and flow_in else 1.0
+    if flow_per_kw <= 0:
+        flow_per_kw = 1.0
 
-    # Keep your existing stub values but compute a consistent tank trajectory.
-    # 1 L/s = 3.6 m3/hour
-    demand_lps_series = [5.0, 6.0]
-    pump_kw_series = [12.0, 13.0]
-    cost_series = [1.1, 1.2]
-    emissions_series = [0.3, 0.35]
+    # Heuristic pump schedule: match demand, with mild headroom to avoid drift
+    pump_kw_series = []
+    for t in range(n):
+        target_kw = float(demand[t]) / flow_per_kw
+        target_kw *= 1.05  # small headroom
+        # clamp via repair_decision ultimately
+        pump_kw_series.append(target_kw)
 
-    traces_rows = []
-    for t in range(len(demand_lps_series)):
-        demand_lps = float(demand_lps_series[t])
-        demand_m3ph = demand_lps * 3.6
+    imp_dec = problem.repair_decision_fn({"pump_power_kw": pump_kw_series}) if problem.repair_decision_fn else {"pump_power_kw": pump_kw_series}
 
-        pump_kw = float(pump_kw_series[t])
-        inflow_m3ph = pump_kw * pump_flow_m3ph_per_kw
+    imp_tr = problem.simulate_fn(imp_dec)
+    imp_cons = problem.constraints_fn(imp_tr, imp_dec)
+    imp_obj = problem.objective_fn(imp_tr, imp_cons, imp_dec)
 
-        tank_level_m3 = tank_level_m3 + (inflow_m3ph - demand_m3ph) * dt_hours
+    imp_feas, imp_worst_name, imp_worst_margin = _feasibility_from_constraints(imp_cons)
+    imp_cost, imp_em = _objective_totals(imp_obj)
 
+    # If infeasible (e.g., tank overflow), reduce headroom and retry once.
+    if not imp_feas:
+        pump_kw_series = []
+        for t in range(n):
+            target_kw = float(demand[t]) / flow_per_kw
+            target_kw *= 0.98  # slight underfill
+            pump_kw_series.append(target_kw)
+        imp_dec = problem.repair_decision_fn({"pump_power_kw": pump_kw_series}) if problem.repair_decision_fn else {"pump_power_kw": pump_kw_series}
+
+        imp_tr = problem.simulate_fn(imp_dec)
+        imp_cons = problem.constraints_fn(imp_tr, imp_dec)
+        imp_obj = problem.objective_fn(imp_tr, imp_cons, imp_dec)
+
+        imp_feas, imp_worst_name, imp_worst_margin = _feasibility_from_constraints(imp_cons)
+        imp_cost, imp_em = _objective_totals(imp_obj)
+
+    delta_cost = base_cost - imp_cost
+    delta_em = base_em - imp_em
+    cost_pct = (delta_cost / base_cost * 100.0) if base_cost else 0.0
+    em_pct = (delta_em / base_em * 100.0) if base_em else 0.0
+
+    # ----------------------------
+    # Build traces rows from improved traces (for plots + CSV)
+    # Add per-step cost/emissions.
+    # ----------------------------
+    t_series = imp_tr.get("t", list(range(n)))
+    dt = float(imp_tr.get("dt_hours", float(problem.time.dt_hours)))
+
+    price = imp_tr.get("price_per_kwh", [0.0] * n)
+    carbon = imp_tr.get("carbon_kg_per_kwh", [0.0] * n)
+    grid = imp_tr.get("grid_import_kw", [0.0] * n)
+    tank = imp_tr.get("tank_level_m3", [None] * n)
+
+    traces_rows: List[Dict[str, Any]] = []
+    for i in range(n):
+        e_kwh = float(grid[i]) * dt
         traces_rows.append(
             {
-                "t": int(t),
-                "demand_lps": demand_lps,
-                "pump_kw": pump_kw,
-                "tank_level_m3": float(tank_level_m3),  # ✅ required for plot
-                "cost": float(cost_series[t]),
-                "emissions": float(emissions_series[t]),
+                "t": int(t_series[i]) if isinstance(t_series, list) and i < len(t_series) else i,
+                "tank_level_m3": float(tank[i]) if tank[i] is not None else None,
+                "pump_power_kw": float(imp_tr.get("pump_power_kw", [0.0] * n)[i]),
+                "demand_m3ph": float(imp_tr.get("demand_m3ph", [0.0] * n)[i]),
+                "cost": e_kwh * float(price[i]),
+                "emissions": e_kwh * float(carbon[i]),
             }
         )
 
+    # ----------------------------
+    # solution.json (truthful)
+    # ----------------------------
     solution = {
         "scenario": scenario["name"],
         "domain": scenario.get("domain", "water_network"),
 
-        "baseline": {"cost": float(baseline_cost), "emissions": float(baseline_emissions), "feasible": bool(baseline_feasible)},
-        "improved": {"cost": float(improved_cost), "emissions": float(improved_emissions), "feasible": bool(improved_feasible)},
+        "baseline": {"cost": float(base_cost), "emissions": float(base_em), "feasible": bool(base_feas)},
+        "improved": {"cost": float(imp_cost), "emissions": float(imp_em), "feasible": bool(imp_feas)},
         "delta": {
             "cost": float(delta_cost),
-            "emissions": float(delta_emissions),
+            "emissions": float(delta_em),
             "cost_percent_reduction": float(cost_pct),
-            "emissions_percent_reduction": float(emissions_pct),
+            "emissions_percent_reduction": float(em_pct),
         },
+
         "feasibility": {
-            "feasible": bool(improved_feasible),
-            "worst_hard_margin": float(worst_hard_margin),
-            "worst_hard_constraint": str(worst_hard_constraint),
+            "feasible": bool(imp_feas),
+            "worst_hard_margin": float(imp_worst_margin) if imp_worst_margin is not None else None,
+            "worst_hard_constraint": str(imp_worst_name) if imp_worst_name is not None else None,
         },
+
         "constraints": [
-            {"name": "pressure_min", "severity": "HARD", "worst_margin": float(worst_hard_margin)}
+            {"name": c.name, "severity": str(c.severity.name), "worst_margin": float(c.margin), "details": (c.details or {})}
+            for c in imp_cons
         ],
+
         "planner": {
             "name": planner.get("name", "baseline_random"),
             "iterations": int(planner.get("iterations", 200)),
             "restarts": int(planner.get("restarts", 1)),
             "stop_on_feasible": bool(planner.get("stop_on_feasible", False)),
         },
+
         "traces": {
             "path": "traces.csv",
             "n_rows": len(traces_rows),
@@ -406,9 +471,9 @@ def run_water_network(normalized_cfg: dict) -> RunArtifacts:
         },
     }
 
-    # Keep Phase 1-compatible keys
+    # Phase 1 compatibility keys
     solution["feasible"] = bool(solution["feasibility"]["feasible"])
-    solution["worst_hard_margin"] = float(solution["feasibility"]["worst_hard_margin"])
+    solution["worst_hard_margin"] = float(solution["feasibility"]["worst_hard_margin"] or 0.0)
     solution["total_cost"] = float(solution["improved"]["cost"])
     solution["total_emissions"] = float(solution["improved"]["emissions"])
     solution["baseline_total_cost"] = float(solution["baseline"]["cost"])
@@ -428,7 +493,7 @@ def run_water_network(normalized_cfg: dict) -> RunArtifacts:
         f"- Reduction: {solution['delta']['emissions']:.2f} ({solution['delta']['emissions_percent_reduction']:.1f}%)\n\n"
         "## Constraint Health\n"
         f"- Worst hard constraint: {solution['feasibility']['worst_hard_constraint']}\n"
-        f"- Worst hard margin: {solution['feasibility']['worst_hard_margin']:.3f}\n"
+        f"- Worst hard margin: {solution['feasibility']['worst_hard_margin']:.6g}\n"
     )
 
     return RunArtifacts(
