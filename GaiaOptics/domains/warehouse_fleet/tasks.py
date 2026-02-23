@@ -198,8 +198,10 @@ def repair_decision(cfg: Dict[str, Any], decision: Dict[str, Any]) -> Dict[str, 
 
     assignments = decision.get("assignments", None)
     if assignments is None:
-        # If a planner uses a different decision representation, we leave it alone.
-        return decision
+        # Initialize with empty lists so the decision is always simulate-able.
+        out = dict(decision)
+        out["assignments"] = [[] for _ in range(n_robots)]
+        return out
 
     if not isinstance(assignments, list):
         raise TypeError("Decision['assignments'] must be list[list[int]]")
