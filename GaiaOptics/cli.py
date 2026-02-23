@@ -608,9 +608,9 @@ def run_water_network(normalized_cfg: Dict[str, Any]) -> RunArtifacts:
 def run_warehouse_fleet(normalized_cfg: Dict[str, Any]) -> RunArtifacts:
     """
     Phase 2 runner for warehouse_fleet:
-    - uses domains.warehouse_fleet.mission.build_problem(cfg) (domain-owned builder)
-    - simulates baseline + improved decisions
-    - writes truthful metrics/traces (no fake numbers)
+    - uses domains.warehouse_fleet.mission.build_problem(cfg)
+    - baseline + improved decisions are simulated, constrained, and scored
+    - decisions must include: {"assignments": list[list[int]]}
     """
     from gaiaoptics.domains.warehouse_fleet.mission import build_problem as build_warehouse_fleet_problem
 
@@ -618,77 +618,86 @@ def run_warehouse_fleet(normalized_cfg: Dict[str, Any]) -> RunArtifacts:
     planner = normalized_cfg.get("planner", {}) or {}
 
     problem = build_warehouse_fleet_problem(normalized_cfg)
-    n = int(problem.time.n_steps)
-
-    # ----------------------------
-    # Baseline: sample/repair
-    # ----------------------------
     seed = int(scenario.get("seed", 0))
-    base_dec = problem.sample_decision_fn(seed) if problem.sample_decision_fn else {}
-    base_dec = problem.repair_decision_fn(base_dec) if problem.repair_decision_fn else (base_dec or {})
 
-    base_tr = problem.simulate_fn(base_dec)
-    base_cons = problem.constraints_fn(base_tr, base_dec)
-    base_obj = problem.objective_fn(base_tr, base_cons, base_dec)
+    def _safe_eval(decision: Dict[str, Any]):
+        """
+        Returns (traces, cons, obj, feas, worst_name, worst_margin)
+        If simulate blows up, treat as infeasible with empty artifacts.
+        """
+        try:
+            dec = decision
+            if problem.repair_decision_fn:
+                dec = problem.repair_decision_fn(dec)
+            tr = problem.simulate_fn(dec)
+            cons = problem.constraints_fn(tr, dec)
+            obj = problem.objective_fn(tr, cons, dec)
+            feas, worst_name, worst_margin = _feasibility_from_constraints(cons)
+            return dec, tr, cons, obj, feas, worst_name, worst_margin
+        except Exception:
+            # Treat any bad decision as infeasible; keep it truthful (no fake numbers)
+            empty_tr: Dict[str, Any] = {"t": list(range(int(problem.time.n_steps)))}
+            empty_cons: List[ConstraintResult] = []
+            empty_obj = ObjectiveResult(score=float("inf"), components={})
+            return decision, empty_tr, empty_cons, empty_obj, False, "exception", None
 
-    base_feas, _, _ = _feasibility_from_constraints(base_cons)
+    def _obj_scalar(obj: ObjectiveResult) -> float:
+        v = getattr(obj, "value", None)
+        if isinstance(v, (int, float)):
+            return float(v)
+        comps = obj.components or {}
+        # fallback to energy_cost if domain uses components
+        return float(comps.get("energy_cost", float("inf")))
+
+    # ----------------------------
+    # Baseline: sample/repair at seed
+    # ----------------------------
+    if not problem.sample_decision_fn:
+        raise ConfigError(
+            "warehouse_fleet",
+            "warehouse_fleet Problem missing sample_decision_fn",
+            hint="Implement tasks.sample_decision(cfg, seed) and wire it in domains/warehouse_fleet/mission.py",
+        )
+
+    base_dec0 = problem.sample_decision_fn(seed)
+    base_dec, base_tr, base_cons, base_obj, base_feas, base_worst_name, base_worst_margin = _safe_eval(base_dec0)
     base_cost, base_em = _objective_totals(base_obj)
 
     # ----------------------------
-    # Improved: simple deterministic heuristic
-    #
-    # Since the warehouse domain is discrete-ish (moves/assignments),
-    # keep it conservative:
-    # - If domain exposes "do_nothing" or empty decision, repair it.
-    # - Otherwise sample a second seed (seed+1) and take whichever is better.
+    # Improved: evaluate a few sampled candidates, pick best feasible
     # ----------------------------
-    cand1 = problem.repair_decision_fn({}) if problem.repair_decision_fn else {}
-    cand1_tr = problem.simulate_fn(cand1)
-    cand1_cons = problem.constraints_fn(cand1_tr, cand1)
-    cand1_obj = problem.objective_fn(cand1_tr, cand1_cons, cand1)
-    cand1_feas, cand1_worst_name, cand1_worst_margin = _feasibility_from_constraints(cand1_cons)
-    cand1_cost, cand1_em = _objective_totals(cand1_obj)
+    best = (base_dec, base_tr, base_cons, base_obj, base_feas, base_worst_name, base_worst_margin)
 
-    cand2 = problem.sample_decision_fn(seed + 1) if problem.sample_decision_fn else {}
-    cand2 = problem.repair_decision_fn(cand2) if problem.repair_decision_fn else (cand2 or {})
-    cand2_tr = problem.simulate_fn(cand2)
-    cand2_cons = problem.constraints_fn(cand2_tr, cand2)
-    cand2_obj = problem.objective_fn(cand2_tr, cand2_cons, cand2)
-    cand2_feas, cand2_worst_name, cand2_worst_margin = _feasibility_from_constraints(cand2_cons)
-    cand2_cost, cand2_em = _objective_totals(cand2_obj)
+    # Try a few deterministic seeds; increase count later if you want.
+    for s in (seed + 1, seed + 2, seed + 3):
+        cand0 = problem.sample_decision_fn(s)
+        cand = _safe_eval(cand0)
 
-    # Pick best feasible candidate by objective scalar (obj.value); fall back to cost if missing.
-    def score_of(obj: ObjectiveResult) -> float:
-        v = getattr(obj, "value", None)
-        return float(v) if isinstance(v, (int, float)) else float((obj.components or {}).get("energy_cost", 0.0))
+        _, _, _, cand_obj, cand_feas, _, _ = cand
+        _, _, _, best_obj, best_feas, _, _ = best
 
-    best_dec = cand1
-    best_tr = cand1_tr
-    best_cons = cand1_cons
-    best_obj = cand1_obj
-    best_feas = cand1_feas
-    best_worst_name = cand1_worst_name
-    best_worst_margin = cand1_worst_margin
+        # Prefer feasible over infeasible; then lower objective scalar
+        if cand_feas and not best_feas:
+            best = cand
+        elif cand_feas == best_feas and _obj_scalar(cand_obj) < _obj_scalar(best_obj):
+            best = cand
 
-    if cand2_feas and not cand1_feas:
-        best_dec, best_tr, best_cons, best_obj = cand2, cand2_tr, cand2_cons, cand2_obj
-        best_feas, best_worst_name, best_worst_margin = cand2_feas, cand2_worst_name, cand2_worst_margin
-    elif cand2_feas and cand1_feas:
-        if score_of(cand2_obj) < score_of(cand1_obj):
-            best_dec, best_tr, best_cons, best_obj = cand2, cand2_tr, cand2_cons, cand2_obj
-            best_feas, best_worst_name, best_worst_margin = cand2_feas, cand2_worst_name, cand2_worst_margin
-
-    imp_cost, imp_em = _objective_totals(best_obj)
+    imp_dec, imp_tr, imp_cons, imp_obj, imp_feas, imp_worst_name, imp_worst_margin = best
+    imp_cost, imp_em = _objective_totals(imp_obj)
 
     delta_cost = base_cost - imp_cost
     delta_em = base_em - imp_em
     cost_pct = (delta_cost / base_cost * 100.0) if base_cost else 0.0
     em_pct = (delta_em / base_em * 100.0) if base_em else 0.0
 
-    # Traces: best-effort pass-through from simulate() if present.
-    # If your domain returns series, include them; else keep minimal.
+    # ----------------------------
+    # Traces rows: best-effort from traces dict
+    # ----------------------------
+    n = int(problem.time.n_steps)
+    t_series = imp_tr.get("t", list(range(n))) if isinstance(imp_tr, dict) else list(range(n))
+
+    # Keep minimal stable CSV; add columns if your sim provides them
     traces_rows: List[Dict[str, Any]] = []
-    t_series = best_tr.get("t", list(range(n))) if isinstance(best_tr, dict) else list(range(n))
     for i in range(n):
         traces_rows.append(
             {
@@ -699,43 +708,45 @@ def run_warehouse_fleet(normalized_cfg: Dict[str, Any]) -> RunArtifacts:
     solution: Dict[str, Any] = {
         "scenario": scenario["name"],
         "domain": scenario.get("domain", "warehouse_fleet"),
+
         "baseline": {"cost": float(base_cost), "emissions": float(base_em), "feasible": bool(base_feas)},
-        "improved": {"cost": float(imp_cost), "emissions": float(imp_em), "feasible": bool(best_feas)},
+        "improved": {"cost": float(imp_cost), "emissions": float(imp_em), "feasible": bool(imp_feas)},
         "delta": {
             "cost": float(delta_cost),
             "emissions": float(delta_em),
             "cost_percent_reduction": float(cost_pct),
             "emissions_percent_reduction": float(em_pct),
         },
+
         "feasibility": {
-            "feasible": bool(best_feas),
-            "worst_hard_margin": float(best_worst_margin) if best_worst_margin is not None else None,
-            "worst_hard_constraint": str(best_worst_name) if best_worst_name is not None else None,
+            "feasible": bool(imp_feas),
+            "worst_hard_margin": float(imp_worst_margin) if imp_worst_margin is not None else None,
+            "worst_hard_constraint": str(imp_worst_name) if imp_worst_name is not None else None,
         },
+
         "constraints": [
-            {
-                "name": c.name,
-                "severity": str(c.severity.name),
-                "worst_margin": float(c.margin),
-                "details": (c.details or {}),
-            }
-            for c in best_cons
+            {"name": c.name, "severity": str(c.severity.name), "worst_margin": float(c.margin), "details": (c.details or {})}
+            for c in imp_cons
         ],
+
         "planner": {
             "name": planner.get("name", "baseline_random"),
             "iterations": int(planner.get("iterations", 200)),
             "restarts": int(planner.get("restarts", 1)),
             "stop_on_feasible": bool(planner.get("stop_on_feasible", False)),
         },
+
+        "decision": imp_dec,
+
         "traces": {
             "path": "traces.csv",
             "n_rows": len(traces_rows),
             "columns": sorted({k for r in traces_rows for k in r.keys()}),
             "preview": traces_rows[:3],
         },
-        "decision": best_dec,
     }
 
+    # Phase 1 compatibility keys
     solution["feasible"] = bool(solution["feasibility"]["feasible"])
     solution["worst_hard_margin"] = float(solution["feasibility"]["worst_hard_margin"] or 0.0)
     solution["total_cost"] = float(solution["improved"]["cost"])
