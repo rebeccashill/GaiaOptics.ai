@@ -536,8 +536,8 @@ def run_water_network(normalized_cfg: dict) -> RunArtifacts:
         e_kwh = float(grid[i]) * dt
         traces_rows.append(
             {
-                "t": int(t_series[i]) if isinstance(t_series, list) and i < len(t_series) else i,
-                "tank_level_m3": float(tank[i]) if tank[i] is not None else None,
+                "t": int(t_series[i]) if isinstance(t_series[i], (int, float)) else None,
+                "tank_level_m3": float(tank[i]) if tank[i] is not None and tank[i] != "" and tank[i] != "None" else None,
                 "pump_power_kw": float(imp_tr.get("pump_power_kw", [0.0] * n)[i]),
                 "demand_m3ph": float(imp_tr.get("demand_m3ph", [0.0] * n)[i]),
                 "cost": e_kwh * float(price[i]),

@@ -43,9 +43,16 @@ def _get(cfg: Dict[str, Any], path: str, default: Any) -> Any:
     return cur
 
 
-def _require_series(name: str, v: Any) -> List[float]:
+def _require_series(name: str, v: Any, n_steps: int) -> List[float]:
+    """
+    Accept scalar or list[n_steps]. Returns list[n_steps].
+    """
+    if isinstance(v, (int, float)):
+        return [float(v)] * n_steps
     if not isinstance(v, list) or not all(isinstance(x, (int, float)) for x in v):
-        raise ValueError(f"microgrid cfg requires '{name}' as a list of numbers")
+        raise ValueError(f"microgrid cfg requires '{name}' as a number or list[n_steps] of numbers")
+    if len(v) != n_steps:
+        raise ValueError(f"{name} must have length horizon.n_steps ({n_steps}), got {len(v)}")
     return [float(x) for x in v]
 
 
@@ -97,10 +104,10 @@ def build_problem_from_config(cfg: Dict[str, Any]) -> Problem:
     price = series.get("price_per_kwh", _default_series(0.2))
     carbon = series.get("carbon_kg_per_kwh", _default_series(0.4))
 
-    load_kw = _require_series("series.load_kw", load_kw)
-    pv_kw = _require_series("series.pv_kw", pv_kw)
-    price_per_kwh = _require_series("series.price_per_kwh", price)
-    carbon_kg_per_kwh = _require_series("series.carbon_kg_per_kwh", carbon)
+    load_kw = _require_series("series.load_kw", load_kw, n_steps)
+    pv_kw = _require_series("series.pv_kw", pv_kw, n_steps)
+    price_per_kwh = _require_series("series.price_per_kwh", price, n_steps)
+    carbon_kg_per_kwh = _require_series("series.carbon_kg_per_kwh", carbon, n_steps)
 
     if len(load_kw) != n_steps:
         raise ValueError("series.load_kw must match horizon.n_steps")
