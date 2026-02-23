@@ -4,7 +4,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from os import error
 from pathlib import Path
-from typing import Any, Dict, Mapping, Optional, Tuple
+from typing import Any, Dict, Mapping, Optional, Sequence, Tuple
 import difflib
 
 import yaml
@@ -85,7 +85,7 @@ def normalize_config(raw: Mapping[str, Any], *, source_path: Optional[Path] = No
     planner = _as_dict(raw.get("planner"), "planner")
     objectives = _as_dict(raw.get("objectives"), "objectives")
 
-    # domain payloads
+    # domain payloads (namespaced)
     microgrid = _as_dict(raw.get("microgrid"), "microgrid")
     data_center = _as_dict(raw.get("data_center"), "data_center")
     water_network = _as_dict(raw.get("water_network"), "water_network")
@@ -123,34 +123,27 @@ def normalize_config(raw: Mapping[str, Any], *, source_path: Optional[Path] = No
     # derived output dir (relative, so tests can redirect with cwd)
     scenario["output_dir"] = f"outputs/{scenario['name']}"
 
-    # ------------------------------------------------------------
-    # Phase 2: Data center canonicalization (preserve nested keys!)
-    # ------------------------------------------------------------
-    dom = scenario.get("domain", None)
+    dom = scenario.get("domain")
 
-    # If user used top-level horizon/series/thermal/cooling (non-namespaced),
-    # fold them into data_center ONLY when domain is data_center.
-    if dom == "data_center":
-        # Pull possible top-level sections
-        top_horizon = raw.get("horizon")
-        top_series = raw.get("series")
-        top_thermal = raw.get("thermal")
-        top_cooling = raw.get("cooling")
+    def _fold_top_level_into(dst: Dict[str, Any], keys: Sequence[str]) -> None:
+        """
+        If raw has a top-level section (e.g., raw["horizon"]) and dst doesn't already,
+        copy it into dst. Never overwrite explicit namespaced keys.
+        """
+        for k in keys:
+            v = raw.get(k)
+            if isinstance(v, dict) and k not in dst:
+                dst[k] = dict(v)
 
-        if isinstance(top_horizon, dict) and "horizon" not in data_center:
-            data_center["horizon"] = dict(top_horizon)
-        if isinstance(top_series, dict) and "series" not in data_center:
-            data_center["series"] = dict(top_series)
-        if isinstance(top_thermal, dict) and "thermal" not in data_center:
-            data_center["thermal"] = dict(top_thermal)
-        if isinstance(top_cooling, dict) and "cooling" not in data_center:
-            data_center["cooling"] = dict(top_cooling)
-
-        # If data_center.horizon is missing pieces, derive from run (optional but helpful)
-        h = data_center.setdefault("horizon", {})
+    def _derive_horizon(dst: Dict[str, Any]) -> None:
+        """
+        If dst["horizon"] exists but missing n_steps/dt_hours, derive from run.horizon_hours and run.timestep_minutes.
+        Does nothing if horizon is not a dict.
+        """
+        h = dst.setdefault("horizon", {})
         if not isinstance(h, dict):
-            h = {}
-            data_center["horizon"] = h
+            dst["horizon"] = {}
+            h = dst["horizon"]
 
         # Only derive if missing/None (never overwrite explicit YAML)
         if h.get("n_steps") is None:
@@ -169,6 +162,26 @@ def normalize_config(raw: Mapping[str, Any], *, source_path: Optional[Path] = No
                     h["dt_hours"] = float(timestep_minutes) / 60.0
             except Exception:
                 pass
+
+    # ------------------------------------------------------------
+    # Phase 2: fold non-namespaced domain payloads based on domain
+    # ------------------------------------------------------------
+    if dom == "data_center":
+        _fold_top_level_into(data_center, ["horizon", "series", "thermal", "cooling"])
+        _derive_horizon(data_center)
+
+    elif dom == "microgrid":
+        # Your microgrid YAML is domain-shaped: horizon/series/battery/grid at top-level.
+        _fold_top_level_into(microgrid, ["horizon", "series", "battery", "grid", "penalties", "options"])
+        # Optional: derive horizon if user omitted it
+        _derive_horizon(microgrid)
+        # Helpful: preserve name inside domain payload (mission uses cfg.get("name"))
+        microgrid.setdefault("name", scenario["name"])
+
+    elif dom == "water_network":
+        _fold_top_level_into(water_network, ["horizon", "series", "tank", "pump"])
+        _derive_horizon(water_network)
+        water_network.setdefault("name", scenario["name"])
 
     # Build canonical dict with stable insertion order
     normalized: Dict[str, Any] = {

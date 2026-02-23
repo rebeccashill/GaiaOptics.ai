@@ -73,7 +73,6 @@ def build_problem_from_config(cfg: Dict[str, Any]) -> Problem:
 
     # --- Core identifiers (must exist even for empty cfg) ---
     name = str(cfg.get("name", "microgrid"))
-    time = cast(TimeIndex, int(cfg.get("time", 0)))
 
     # --- Horizon ---
     horizon = cfg.get("horizon", {}) or {}
@@ -83,6 +82,8 @@ def build_problem_from_config(cfg: Dict[str, Any]) -> Problem:
         raise ValueError("horizon.n_steps must be > 0")
     if dt_hours <= 0:
         raise ValueError("horizon.dt_hours must be > 0")
+
+    time = TimeIndex(n_steps=n_steps, dt_hours=dt_hours)
 
     # --- Series (defaults if missing, so empty cfg works) ---
     series = cfg.get("series", {}) or {}
