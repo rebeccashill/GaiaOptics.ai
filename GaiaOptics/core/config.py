@@ -9,7 +9,7 @@ import difflib
 
 import yaml
 
-from GaiaOptics.core.errors import ConfigError
+from gaiaoptics.core.errors import ConfigError
 
 
 CANONICAL_TOP_LEVEL_KEYS = ("scenario", "run", "planner", "objectives", "microgrid", "data_center", "water_network")

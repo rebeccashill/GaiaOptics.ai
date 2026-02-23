@@ -4,9 +4,9 @@ from __future__ import annotations
 import argparse
 from pathlib import Path
 
-from GaiaOptics.core.config import load_yaml, normalize_config, validate_config
-from GaiaOptics.core.errors import ConfigError
-from GaiaOptics.core.output import RunArtifacts, write_output_contract
+from gaiaoptics.core.config import load_yaml, normalize_config, validate_config
+from gaiaoptics.core.errors import ConfigError
+from gaiaoptics.core.output import RunArtifacts, write_output_contract
 
 def run_microgrid(normalized_cfg: dict) -> RunArtifacts:
     """
