@@ -1,1 +1,0 @@
-# GaiaOptics.ai
