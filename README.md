@@ -240,6 +240,3 @@ GaiaOptics is designed for:
 - Decision validation frameworks
 
 ---
-
-License: Add appropriate license here  
-Contact: Add enterprise contact information here
