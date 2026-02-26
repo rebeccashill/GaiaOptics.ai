@@ -62,15 +62,25 @@ Includes:
 Execution Flow:
 
 YAML Config
+
     ↓
+    
 build_problem()
+
     ↓
+    
 simulate()
+
     ↓
+    
 constraints_fn()
+
     ↓
+    
 objective()
+
     ↓
+    
 Artifact Writer (CSV / Report / Plot)
 
 Design Guarantees:
